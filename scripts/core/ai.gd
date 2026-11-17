@@ -1,6 +1,15 @@
 class_name RTAI
 extends RefCounted
 ## Giocatore artificiale di Rattus.
+## Strategie dei giocatori umani usate (recensioni e resoconti di partite, discussioni su BoardGameGeek):
+## - la Peste va dove gli avversari hanno molti cubetti e noi pochi o nessuno, e dove ci sono più ratti;
+## - le carte costano: ogni carta tenuta espone ai simboli di quella classe, quindi se ne tengono poche e
+##   prendere una carta a un avversario è anche un attacco (gli toglie il potere, a volte il rischio);
+## - meglio non avere la maggioranza nelle regioni con molti ratti (le M) e non fare mucchi enormi:
+##   le soglie dei ratti vanno da 1 a 6, una regione con più di 6 abitanti scatta con qualsiasi ratto;
+## - chi ammucchia cubetti in una regione con tre ratti cresce di tre a turno: va punito con la Peste;
+## - il Re vale sempre di più verso la fine, quando tutti i ratti rimasti si scoprono in ogni regione;
+## - il Cavaliere scatena le epidemie anche nelle regioni poco popolate (due abitanti in più).
 ## Valuta le posizioni con una stima del rischio: per ogni regione simula la devastazione con i gettoni
 ## che conosce (quelli visti con la Strega) e con estrazioni a caso di quelli ignoti; il rischio pesa di
 ## più nella regione della Peste e in quelle vicine. Prova ogni mossa possibile su una copia dello stato
@@ -15,26 +24,77 @@ var plan := {}
 var _cache := {}
 var _samples := 10
 var _final := false
+var _crn := RandomNumberGenerator.new()
+var _crn_base := 1
 
 
 func _init(lv := 1, seed_value := 0) -> void:
 	level = lv
 	rng.seed = seed_value if seed_value != 0 else 12345 + lv
-	_samples = [5, 10, 22][clampi(lv, 0, 2)]
+	_samples = [5, 12, 26][clampi(lv, 0, 2)]
 
 
 # ================================================================ valutazione
 
-func _w(s: RTState, r: int, hot := -1) -> float:
+## Pesi del rischio, ricavati dai consigli dei giocatori (vedi la nota in cima al file) e tarati con
+## migliaia di partite fra IA. Si possono cambiare per le prove (tests/tara_ia.gd).
+var K := {
+	"far0": 0.45,      # peso delle regioni lontane dalla Peste a inizio partita…
+	"far1": 0.95,      # …e verso la fine (alla fine si scoprono tutti i ratti)
+	"reach1": 0.9,     # regioni dove la Peste può arrivare al prossimo turno
+	"reach2": 0.78,    # regioni a due passi, se un avversario ha Cavaliere, Crociato o Soldato
+	"conc": 0.0,      # penalità per i mucchi di cubetti nelle regioni con ratti
+	"card": 0.03,      # esposizione futura per ogni carta tenuta (per regione occupata)
+	"growth": 0.05,    # spinta a tenere cubetti dove ci sono ratti (si aggiunge di più)
+	"deny": 0.0,
+	"steal": 0.45,     # prendere una carta a un avversario è anche un attacco
+	"look": 0.0,       # guardare avanti fino alla mossa della Peste
+      # valore di togliere i ratti dove gli avversari crescono
+	"others_max": 0.65 # quanto conta il primo avversario rispetto alla media degli altri
+}
+var _reach := {}
+var _reach_key := ""
+
+
+## Avanzamento della partita: 0 all'inizio, 1 quando la riserva dei ratti è finita.
+func _progress(s: RTState) -> float:
+	var tot := float(s.bag.size() + s.removed.size())
+	return 0.0 if tot <= 0.0 else clampf(float(s.removed.size()) / tot, 0.0, 1.0)
+
+
+func _reach_of(s: RTState, p: int) -> Dictionary:
+	var key := "%d|%s|%s" % [s.plague, str(s.walls), str(s.owner.values())]
+	if key == _reach_key:
+		return _reach
+	_reach_key = key
+	_reach = {}
+	var knight := false
+	for q in s.n:
+		if q != p and (s.holds(q, "cavaliere") or s.holds(q, "crociato") or s.holds(q, "soldato")):
+			knight = true
+	for x in s.nbrs(s.plague):
+		_reach[x] = 1
+		if knight:
+			for y in s.nbrs(x):
+				if y != s.plague and not _reach.has(y):
+					_reach[y] = 2
+	return _reach
+
+
+func _w(s: RTState, r: int, hot := -1, p := -1) -> float:
 	if _final:
 		return 1.0
 	if r == hot:
 		return 1.0
+	var far: float = lerpf(K["far0"], K["far1"], _progress(s))
+	var rc := _reach_of(s, p)
+	if rc.get(r, 0) == 1:
+		return maxf(far, K["reach1"])
+	if rc.get(r, 0) == 2:
+		return maxf(far, K["reach2"])
 	if r == s.plague:
-		return 0.85
-	if r in s.nbrs(s.plague):
-		return 0.75
-	return 0.6
+		return maxf(far, 0.7)
+	return far
 
 
 func _el(s: RTState, p: int, r: int, neutral := 0, serf := -1) -> Array:
@@ -42,23 +102,43 @@ func _el(s: RTState, p: int, r: int, neutral := 0, serf := -1) -> Array:
 		s.nuns_in(r), neutral, serf, str(s.owner.values())]
 	if _cache.has(key):
 		return _cache[key]
-	var v := s.expected_loss(p, r, neutral, _samples, rng, serf)
+	# numeri casuali comuni: le stesse estrazioni per tutte le varianti della stessa regione, così il
+	# confronto fra due mosse non dipende dalla fortuna delle simulazioni
+	_crn.seed = _crn_base + r * 7919
+	var v := s.expected_loss(p, r, neutral, _samples, _crn, serf)
 	_cache[key] = v
 	return v
 
 
 ## Valore della posizione per p: abitanti al sicuro meno le perdite attese, confrontato con gli avversari.
+## Oltre al rischio dei ratti già sul tabellone conta: i mucchi grossi nelle regioni con ratti (le soglie
+## alte scattano tutte e le M colpiscono chi ha la maggioranza), quante carte si tengono (ogni carta
+## espone ai simboli dei ratti futuri) e, verso la fine, che tutti i ratti rimasti si scopriranno.
 func value(s: RTState, p: int, hot := -1, neutral := 0, serf := -1) -> float:
 	var v := []
 	for q in s.n:
 		v.append(float(s.palace[q] + s.onboard(q)) + s.baker[q] * 0.6)
+	var occupied := []
+	for q in s.n:
+		occupied.append(0)
 	for r in s.regions():
-		if s.rats[r].is_empty() or s.total(r) == 0:
+		var nr: int = s.rats[r].size()
+		for q in s.n:
+			var c: int = s.cubes[r][q]
+			if c > 0:
+				occupied[q] += 1
+				if nr >= 2 and not _final:
+					v[q] -= K["conc"] * maxf(0.0, c - 3) * maxf(0.0, c - 3) * (nr - 1)
+		if nr == 0 or s.total(r) == 0:
 			continue
-		var w := _w(s, r, hot)
+		var w := _w(s, r, hot, p)
 		var el := _el(s, p, r, neutral if r == hot else 0, serf if r == hot else -1)
 		for q in s.n:
 			v[q] -= w * el[q]
+	if not _final:
+		var left := 1.0 - _progress(s)
+		for q in s.n:
+			v[q] -= K["card"] * s.held(q).size() * occupied[q] * left
 	var mine: float = v[p]
 	var best := -1e9
 	var sum := 0.0
@@ -67,13 +147,12 @@ func value(s: RTState, p: int, hot := -1, neutral := 0, serf := -1) -> float:
 			continue
 		best = maxf(best, v[q])
 		sum += v[q]
-	var others := best * 0.65 + (sum / maxf(1.0, s.n - 1)) * 0.35
-	# piccola spinta a tenere cubetti nelle regioni con ratti (rendono di più quando si aggiunge)
+	var others: float = best * K["others_max"] + (sum / maxf(1.0, s.n - 1)) * (1.0 - K["others_max"])
 	var growth := 0.0
 	if not _final:
 		for r in s.regions():
 			if s.cubes[r][p] > 0 and s.rats[r].size() > 0:
-				growth += 0.05
+				growth += K["growth"]
 	return mine - others + growth
 
 
@@ -85,7 +164,7 @@ func card_bonus(s: RTState, p: int, c: String) -> float:
 			for r in s.regions():
 				if s.cubes[r][p] > 0 and s.rats[r].is_empty():
 					b += 0.15
-			return minf(b, 0.9)
+			return minf(b, 0.9) + 0.5 * _progress(s)
 		"cavaliere": return 0.55
 		"mercante": return 0.5
 		"monaco": return 0.6
@@ -108,13 +187,14 @@ func card_bonus(s: RTState, p: int, c: String) -> float:
 
 
 func _noise() -> float:
-	return rng.randf_range(-0.5, 0.5) if level == 0 else (rng.randf_range(-0.08, 0.08) if level == 1 else 0.0)
+	return rng.randf_range(-0.8, 0.8) if level == 0 else (rng.randf_range(-0.08, 0.08) if level == 1 else 0.0)
 
 
 # ================================================================ decisioni
 
 func decide(e, p: int, req: Dictionary) -> int:
 	_cache.clear()
+	_crn_base = rng.randi()
 	_final = e.phase == "final"
 	var opts: Array = req.get("opts", [])
 	if opts.is_empty():
@@ -201,7 +281,7 @@ func _setup_score(s: RTState, p: int, r: int) -> float:
 
 func _action(e, p: int, opts: Array) -> int:
 	var s: RTState = e.st
-	var base := value(s, p)
+	var base := _val(s, p)
 	var best_i := opts.size() - 1
 	var best_gain := 0.04 if level > 0 else 0.25
 	var best_plan := {}
@@ -235,9 +315,9 @@ func _plan_take(e, p: int, base: float) -> Dictionary:
 		var cl := s.clone()
 		var o := cl.holder(c)
 		cl.owner[c] = p
-		var g := value(cl, p) - base + card_bonus(cl, p, c)
+		var g := _val(cl, p) - base + card_bonus(cl, p, c)
 		if o >= 0:
-			g += 0.45 * card_bonus(s, o, c)
+			g += K["steal"] * card_bonus(s, o, c)
 		# tenere carte espone ai simboli di quella classe sui ratti futuri
 		var exposed := 0
 		for r in s.regions():
@@ -255,7 +335,7 @@ func _plan_place(e, p: int, base: float) -> Dictionary:
 	for o in s.place_options(p):
 		var cl := s.clone()
 		cl.add_cubes(p, o["r"], o["k"])
-		var g := value(cl, p) - base
+		var g := _val(cl, p) - base
 		if best.is_empty() or g > best["gain"]:
 			best = {"gain": g, "kind": "place", "r": o["r"]}
 	if s.holds(p, "borgomastro"):
@@ -277,7 +357,7 @@ func _plan_place(e, p: int, base: float) -> Dictionary:
 						br = r
 				cl.add_cubes(p, br, 1)
 				extra.append(br)
-			var g := value(cl, p) - base
+			var g := _val(cl, p) - base
 			if best.is_empty() or g > best["gain"]:
 				best = {"gain": g, "kind": "place", "mayor": true, "extra": extra}
 	return best
@@ -293,7 +373,7 @@ func _plan_card(e, p: int, c: String, base: float) -> Dictionary:
 					var cl := s.clone()
 					cl.take_cubes(p, r, 1)
 					cl.palace[p] += 1
-					var g := value(cl, p) - base + (0.25 if not _final else 0.0)
+					var g := _val(cl, p) - base + (0.25 if not _final else 0.0)
 					best = _better(best, {"gain": g, "r": r})
 		"monaco":
 			for m in e.monk_moves():
@@ -304,14 +384,14 @@ func _plan_card(e, p: int, c: String, base: float) -> Dictionary:
 					var t: int = cl.rats[m[0]][i]
 					cl.rats[m[0]].remove_at(i)
 					cl.rats[m[1]].append(t)
-					best = _better(best, {"gain": value(cl, p) - base, "src": m[0], "i": i, "dst": m[1]})
+					best = _better(best, {"gain": _val(cl, p) - base, "src": m[0], "i": i, "dst": m[1]})
 		"mercante":
 			for a in e.merchant_sources(p):
 				for b in s.nbrs(a):
 					for k in range(1, mini(3, s.cubes[a][p]) + 1):
 						var cl := s.clone()
 						cl.move_cubes(p, a, b, k)
-						best = _better(best, {"gain": value(cl, p) - base, "src": a, "dst": b, "k": k})
+						best = _better(best, {"gain": _val(cl, p) - base, "src": a, "dst": b, "k": k})
 		"pifferaio":
 			for a in e.merchant_sources(p):
 				for b in s.nbrs(a):
@@ -320,7 +400,7 @@ func _plan_card(e, p: int, c: String, base: float) -> Dictionary:
 					if not cl.has_bishop(b):
 						for j in mini(cl.rats[a].size(), 3 - cl.rats[b].size()):
 							cl.rats[b].append(cl.rats[a].pop_back())
-					best = _better(best, {"gain": value(cl, p) - base, "src": a, "dst": b})
+					best = _better(best, {"gain": _val(cl, p) - base, "src": a, "dst": b})
 		"corriere":
 			for x in e.courier_firsts():
 				for y in e.courier_seconds(x[0], x[1]):
@@ -329,14 +409,14 @@ func _plan_card(e, p: int, c: String, base: float) -> Dictionary:
 					var cl := s.clone()
 					cl.move_cubes(x[1], x[0], y[0], 1)
 					cl.move_cubes(y[1], y[0], x[0], 1)
-					best = _better(best, {"gain": value(cl, p) - base, "a": x, "b": y})
+					best = _better(best, {"gain": _val(cl, p) - base, "a": x, "b": y})
 		"mago":
 			for r in s.regions():
 				if s.cubes[r][p] > 0:
 					var cl := s.clone()
 					cl.potions[r][p] += 1
 					cl.potion_supply -= 1
-					best = _better(best, {"gain": value(cl, p) - base + 0.15, "r": r})
+					best = _better(best, {"gain": _val(cl, p) - base + 0.15, "r": r})
 		"fornaio":
 			if s.supply(p) >= 4 and not _final:
 				best = {"gain": 0.2, "kind": "card"}
@@ -376,7 +456,7 @@ func _plan_card(e, p: int, c: String, base: float) -> Dictionary:
 				if br >= 0:
 					cl.nuns[i] = br
 				nun_plan.append(br)
-			tot = value(cl, p) - base
+			tot = _val(cl, p) - base
 			best = {"gain": tot, "nuns": nun_plan}
 		"imperatore":
 			var walls := s.walls.duplicate()
@@ -405,12 +485,12 @@ func _plan_card(e, p: int, c: String, base: float) -> Dictionary:
 			for r in regs:
 				var cl := s.clone()
 				cl.add_cubes(p, r, k)
-				best = _better(best, {"gain": value(cl, p) - base + 0.01, "r": r})
+				best = _better(best, {"gain": _val(cl, p) - base + 0.01, "r": r})
 		"soldato":
 			for r in s.nbrs(s.plague).filter(s.can_get_rat):
 				var cl := s.clone()
 				cl.rats[r].append(_fake_token(cl, p))
-				best = _better(best, {"gain": value(cl, p) - base, "r": r})
+				best = _better(best, {"gain": _val(cl, p) - base, "r": r})
 		"cavaliere", "crociato", "servo":
 			best = {"gain": 0.3}
 	if not best.is_empty():
@@ -554,39 +634,70 @@ func _follow(e, p: int, kind: String, opts: Array) -> int:
 
 func _plague(e, p: int, opts: Array, final: bool) -> int:
 	var s: RTState = e.st
+	return _best(opts, func(o):
+		return plague_eval(s, p, s.plague if o.get("skip", false) else int(o["r"]), final))
+
+
+## Valore per p di portare la Peste nella regione d: diffusione dei ratti nuovi (dove fanno più danno
+## agli altri) e devastazione attesa, con o senza i due abitanti del Cavaliere.
+func plague_eval(s: RTState, p: int, d: int, final := false) -> float:
 	var knight := s.holds(p, "cavaliere")
 	var serf := p if s.holds(p, "servo") else -1
-	return _best(opts, func(o):
-		var cl := s.clone()
-		if not o.get("skip", false):
-			cl.plague = o["r"]
-		var d: int = cl.plague
-		if not final:
-			# diffusione: i ratti nuovi vanno dove fanno più danni agli altri
-			var k: int = cl.rats[d].size()
-			var add := 0 if k == 0 else (1 if k == 1 else 2)
-			if cl.holds(p, "soldato") and k > 0:
-				add += 1
-			for i in add:
-				var dsts: Array = cl.nbrs(d).filter(cl.can_get_rat)
-				if dsts.is_empty() or cl.bag.is_empty():
-					break
-				var br: int = dsts[0]
-				var bh := -1e9
-				for x in dsts:
-					var opp := 0
-					for q in cl.n:
-						if q != p:
-							opp += cl.cubes[x][q]
-					var h: float = opp - 1.4 * cl.cubes[x][p]
-					if h > bh:
-							bh = h
-							br = x
-				cl.rats[br].append(_fake_token(cl, p))
-		var v := value(cl, p, d, 0, serf)
-		if knight:
-			v = maxf(v, value(cl, p, d, 2, serf))
-		return v)
+	var cl := s.clone()
+	cl.plague = d
+	if not final:
+		var k: int = cl.rats[d].size()
+		var add := 0 if k == 0 else (1 if k == 1 else 2)
+		if cl.holds(p, "soldato") and k > 0:
+			add += 1
+		for i in add:
+			var dsts: Array = cl.nbrs(d).filter(cl.can_get_rat)
+			if dsts.is_empty() or cl.bag.is_empty():
+				break
+			var br: int = dsts[0]
+			var bh := -1e9
+			for x in dsts:
+				var opp := 0
+				for q in cl.n:
+					if q != p:
+						opp += cl.cubes[x][q]
+				var h: float = opp - 1.4 * cl.cubes[x][p]
+				if h > bh:
+					bh = h
+					br = x
+			cl.rats[br].append(_fake_token(cl, p))
+	var v := value(cl, p, d, 0, serf)
+	if knight and cl.total(d) > 0 and not cl.rats[d].is_empty():
+		v = maxf(v, value(cl, p, d, 2, serf))
+	# togliere i ratti a chi ci sta crescendo sopra (i ratti scoperti escono dal gioco)
+	if not final and cl.total(d) > 0 and K["deny"] > 0.0:
+		var opp := 0
+		for q in cl.n:
+			if q != p:
+				opp = maxi(opp, cl.cubes[d][q])
+		v += K["deny"] * cl.rats[d].size() * (opp - cl.cubes[d][p]) / maxf(1.0, cl.total(d))
+	return v
+
+
+## Valore di una posizione a metà turno: si guarda già alla mossa migliore della Peste che seguirà
+## (così Monaco, Strega, Mercante e Pifferaio preparano il colpo, come fanno i giocatori esperti).
+func _val(s: RTState, p: int) -> float:
+	if _final or K["look"] <= 0.0:
+		return value(s, p)
+	var steps := 2 if (s.holds(p, "cavaliere") or s.holds(p, "crociato") or s.holds(p, "soldato")) else 1
+	var frontier := [s.plague]
+	var seen := {s.plague: true}
+	var best := -1e9
+	for k in steps:
+		var nxt := []
+		for r in frontier:
+			for x in s.nbrs(r):
+				if not seen.has(x):
+					seen[x] = true
+					nxt.append(x)
+					best = maxf(best, plague_eval(s, p, x))
+		frontier = nxt
+	return value(s, p) if best < -1e8 else best
 
 
 func _order(e, p: int, opts: Array) -> int:

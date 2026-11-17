@@ -47,9 +47,9 @@ I poteri si usano solo nel proprio turno, una volta per carta, prima di muovere 
 Il gioco base usa le sei carte classiche (Contadino, Mercante, Monaco, Cavaliere, Strega, Re). Con il Pifferaio magico ogni classe ha tre carte: se ne usano sei per partita, a scelta o a caso."""
 
 const STRATEGY := """[font_size=34][color=#f0d58a]Consigli di strategia[/color][/font_size]
-[b]Crescere costa.[/b] Più ratti ci sono in una regione, più cubetti puoi aggiungere lì; ma più abitanti ci sono, più facile è superare le soglie dei ratti. Le regioni affollate sono una bomba a orologeria: tieni i cubetti divisi in più regioni.
+[b]Crescere costa, ma conviene.[/b] Più ratti ci sono in una regione, più cubetti puoi aggiungere lì: chi resta in una regione con tre ratti cresce di tre a turno. Ogni ratto uccide pochi cubetti (uno per simbolo), quindi un mucchio grosso perde poco per volta; il vero pericolo è la Peste che arriva quando gli altri l'hanno puntata lì. Tieni d'occhio chi sta crescendo così e portagli la Peste.
 [b]Guarda dove può andare la Peste.[/b] Si muove di un passo per turno (due con Cavaliere, Crociato o Soldato): le regioni vicine alla Peste sono le più a rischio, quelle lontane hanno qualche turno di respiro.
-[b]Le carte sono un'arma a doppio taglio.[/b] Prendere una carta a un avversario gli toglie il vantaggio e gli toglie anche il rischio: a volte conviene lasciargli una classe che sta per essere colpita.
+[b]Le carte sono un'arma a doppio taglio.[/b] Ogni carta tenuta ti espone ai simboli della sua classe su tutti i ratti futuri: tienine poche. Prendere una carta a un avversario è un attacco (gli togli il potere), ma gli togli anche il rischio: a volte conviene lasciargli una classe che sta per essere colpita.
 [b]Le maggioranze attirano le M.[/b] Essere i primi in una regione con molti ratti significa prendersi i colpi delle M. Una presenza piccola accanto a un avversario grosso è spesso più sicura.
 [b]Pensa alla fine.[/b] Alla fine tutti i ratti rimasti si scoprono in ogni regione: i cubetti in regioni piene di ratti sono a rischio anche se la Peste non ci passa mai. Il Re (palazzo) e il Mercante (fuga) sono preziosi nelle ultime fasi.
 [b]La Strega e i ratti noti.[/b] Un ratto visto con la Strega resta segnato per te sul tabellone (vedi la sua faccia): sfruttalo per decidere dove crescere o dove mandare la Peste.
