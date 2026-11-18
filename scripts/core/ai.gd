@@ -43,11 +43,16 @@ var K := {
 	"far1": 0.95,      # …e verso la fine (alla fine si scoprono tutti i ratti)
 	"reach1": 0.9,     # regioni dove la Peste può arrivare al prossimo turno
 	"reach2": 0.78,    # regioni a due passi, se un avversario ha Cavaliere, Crociato o Soldato
-	"conc": 0.0,      # penalità per i mucchi di cubetti nelle regioni con ratti
+	"conc": 0.012,     # penalità per i mucchi di cubetti nelle regioni con ratti…
+	"pile": 8.0,       # …da quanti cubetti in su comincia a pesare
 	"card": 0.03,      # esposizione futura per ogni carta tenuta (per regione occupata)
 	"growth": 0.05,    # spinta a tenere cubetti dove ci sono ratti (si aggiunge di più)
-	"deny": 0.0,
+	"deny": 0.25,
 	"steal": 0.45,     # prendere una carta a un avversario è anche un attacco
+	"power_now": 1.0,  # parte del guadagno immediato del potere che conta nel prendere la carta
+	"power_later": 0.6,# parte del valore futuro della carta
+	"hit": 1.5,        # quanto vale colpire subito gli avversari con la Peste
+	"act": 0.12,       # preferire una Peste che colpisce a una che va a vuoto
 	"look": 0.0,       # guardare avanti fino alla mossa della Peste
       # valore di togliere i ratti dove gli avversari crescono
 	"others_max": 0.65 # quanto conta il primo avversario rispetto alla media degli altri
@@ -128,7 +133,7 @@ func value(s: RTState, p: int, hot := -1, neutral := 0, serf := -1) -> float:
 			if c > 0:
 				occupied[q] += 1
 				if nr >= 2 and not _final:
-					v[q] -= K["conc"] * maxf(0.0, c - 3) * maxf(0.0, c - 3) * (nr - 1)
+					v[q] -= K["conc"] * maxf(0.0, c - K["pile"]) * maxf(0.0, c - K["pile"]) * (nr - 1)
 		if nr == 0 or s.total(r) == 0:
 			continue
 		var w := _w(s, r, hot, p)
@@ -315,18 +320,27 @@ func _plan_take(e, p: int, base: float) -> Dictionary:
 		var cl := s.clone()
 		var o := cl.holder(c)
 		cl.owner[c] = p
-		var g := _val(cl, p) - base + card_bonus(cl, p, c)
+		# il rischio di tenere la carta è già nel valore (simboli dei ratti presenti + costo delle carte)
+		var g := _val(cl, p) - base + card_power(e, cl, p, c)
 		if o >= 0:
-			g += K["steal"] * card_bonus(s, o, c)
-		# tenere carte espone ai simboli di quella classe sui ratti futuri
-		var exposed := 0
-		for r in s.regions():
-			if s.cubes[r][p] > 0:
-				exposed += s.cubes[r][p]
-		g -= 0.025 * exposed
+			g += K["steal"] * card_power(e, s, o, c)
 		if best.is_empty() or g > best["gain"]:
 			best = {"gain": g, "kind": "take", "c": c}
 	return best
+
+
+## Quanto rende avere la carta c: per i poteri da usare, il guadagno della mossa migliore che si può
+## fare subito con quella carta (più un po' per i turni dopo); per le carte che agiscono da sole, una stima.
+func card_power(e, s: RTState, p: int, c: String) -> float:
+	if c in ["re", "monaco", "mercante", "pifferaio", "corriere", "mago", "suora", "vescovo", "imperatore"] and not _final:
+		var keep: RTState = e.st
+		e.st = s
+		var base := value(s, p)
+		var pl := _plan_card(e, p, c, base)
+		e.st = keep
+		var now := 0.0 if pl.is_empty() else maxf(0.0, float(pl["gain"]))
+		return K["power_now"] * now + K["power_later"] * card_bonus(s, p, c)
+	return card_bonus(s, p, c)
 
 
 func _plan_place(e, p: int, base: float) -> Dictionary:
@@ -669,6 +683,20 @@ func plague_eval(s: RTState, p: int, d: int, final := false) -> float:
 	var v := value(cl, p, d, 0, serf)
 	if knight and cl.total(d) > 0 and not cl.rats[d].is_empty():
 		v = maxf(v, value(cl, p, d, 2, serf))
+	# colpire adesso: le perdite di oggi sono certe (i ratti scoperti escono dal gioco, chi tiene le carte
+	# le tiene adesso), quindi la Peste va dove fa più danni agli altri e meno a noi, non a vuoto
+	if cl.total(d) > 0 and not cl.rats[d].is_empty():
+		var el := _el(cl, p, d, 2 if (knight and K["hit"] > 0.0) else 0, serf)
+		var mx := 0.0
+		var sum := 0.0
+		var tot := 0.0
+		for q in cl.n:
+			tot += el[q]
+			if q != p:
+				mx = maxf(mx, el[q])
+				sum += el[q]
+		var opp := 0.6 * mx + 0.4 * sum / maxf(1.0, cl.n - 1)
+		v += K["hit"] * (opp - 1.25 * el[p]) + K["act"] * minf(tot, 3.0)
 	# togliere i ratti a chi ci sta crescendo sopra (i ratti scoperti escono dal gioco)
 	if not final and cl.total(d) > 0 and K["deny"] > 0.0:
 		var opp := 0

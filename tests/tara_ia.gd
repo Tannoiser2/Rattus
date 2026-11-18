@@ -31,7 +31,7 @@ func _init() -> void:
 			if p == me:
 				var a := RTAI.new(int(over.get("level", 1)), 300 + g)
 				for k in over:
-					if k == "level":
+					if k == "level" or k == "vs":
 						continue
 					if k == "samples":
 						a._samples = int(over[k])
@@ -39,7 +39,7 @@ func _init() -> void:
 						a.K[k] = over[k]
 				e.ais[p] = a
 			else:
-				e.ais[p] = RTAIOld.new(1, 77 + g * 10 + p)
+				e.ais[p] = (RTAIPrev.new(1, 77 + g * 10 + p) if over.get("vs", 1.0) > 0.5 else RTAIOld.new(1, 77 + g * 10 + p))
 		root.add_child(e)
 		await e.run()
 		var top: int = e.result["ranking"][0]["score"]
